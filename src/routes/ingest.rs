@@ -8,6 +8,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::stream;
 use serde_json::Value;
 use tracing::{info, info_span, warn, Instrument};
@@ -15,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{
     bridge::{
-        config::{BridgeConfig, RouteConfig},
+        config::{BridgeConfig, RouteConfig, RAW_BODY_BASE64_KEY},
         dispatcher::{DispatchRequest, UploadedFile},
         template::TemplateContext,
     },
@@ -30,7 +31,10 @@ pub fn router(config: &BridgeConfig) -> Router<AppState> {
         .iter()
         .filter(|route| route.method.eq_ignore_ascii_case("POST"))
     {
-        let route_config = Arc::new(route.clone());
+        let route_config = Arc::new(IngestRoute {
+            needs_raw_body: route.sink.references_raw_body(),
+            config: route.clone(),
+        });
         router = router.route(
             &route.path,
             post(move |state, params, query, uri, headers, body| {
@@ -49,20 +53,31 @@ pub fn router(config: &BridgeConfig) -> Router<AppState> {
     router
 }
 
+/// Rota de ingestao com o que da para decidir uma vez, na montagem do router.
+struct IngestRoute {
+    config: RouteConfig,
+    /// Algum template do sink le `context.rawBodyBase64`.
+    needs_raw_body: bool,
+}
+
 async fn handle_ingest(
     State(state): State<AppState>,
     Path(params): Path<BTreeMap<String, String>>,
     Query(query): Query<BTreeMap<String, String>>,
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
-    route: Arc<RouteConfig>,
+    ingest_route: Arc<IngestRoute>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
+    let route = &ingest_route.config;
     let request_id = Uuid::new_v4().to_string();
     let route_id = route.id.clone();
     let sink_type = route.sink.type_name();
     let request_path = uri.path().to_string();
     let request_body_bytes = body.len();
+    // Bytes exatos do request, para quem precisa verificar assinatura depois (HMAC sobre o
+    // body cru). Calculado so quando o sink referencia `context.rawBodyBase64`.
+    let raw_body_base64 = ingest_route.needs_raw_body.then(|| STANDARD.encode(&body));
     let ingest_span = info_span!(
         "postio.ingest.request",
         request_id = %request_id,
@@ -92,7 +107,7 @@ async fn handle_ingest(
         };
         info!(body.kind = body_kind, "request body parsed");
 
-        let template_context = {
+        let mut template_context = {
             let _span = info_span!(
                 "postio.ingest.build_context",
                 path.params_count = params.len(),
@@ -116,6 +131,11 @@ async fn handle_ingest(
                 ]),
             }
         };
+        if let Some(raw_body_base64) = raw_body_base64 {
+            template_context
+                .context
+                .insert(RAW_BODY_BASE64_KEY.to_string(), raw_body_base64);
+        }
 
         let response = state
             .dispatcher()

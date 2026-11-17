@@ -335,6 +335,64 @@ async fn configured_ingest_route_dispatches_to_sink() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ingest_route_exposes_exact_raw_body_base64_when_sink_uses_it() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let route = |id: &str, path: &str, message: Value| RouteConfig {
+        id: id.to_string(),
+        method: "POST".to_string(),
+        path: path.to_string(),
+        sink: SinkConfig::Sns {
+            topic: None,
+            topic_arn: Some("arn:aws:sns:us-east-1:000000000000:t".to_string()),
+            subject: None,
+            message: Some(message),
+            attributes: None,
+        },
+    };
+    let bridge_config = BridgeConfig {
+        routes: vec![
+            route(
+                "signed",
+                "/signed",
+                json!({"payload": "{{ body }}", "rawBodyBase64": "{{ context.rawBodyBase64 }}"}),
+            ),
+            route("plain", "/plain", json!({"payload": "{{ body }}"})),
+        ],
+        pipeline: None,
+    };
+    let router = setup_router_with_bridge_config(bridge_config, dispatcher.clone()).await;
+    // Espacos e ordem de chaves que o parse JSON nao preserva: a assinatura e sobre estes bytes.
+    let raw = "{ \"natural_person_id\": \"538509\",\n  \"analysis_status\":\"manually_approved\" }";
+
+    for path in ["/signed", "/plain"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(raw))
+                    .expect("build request"),
+            )
+            .await
+            .expect("request failed");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    let calls = dispatcher.calls.lock().expect("calls");
+    let encoded = &calls[0].template_context.context["rawBodyBase64"];
+    assert_eq!(STANDARD.decode(encoded).expect("base64"), raw.as_bytes());
+    assert_eq!(calls[0].body["natural_person_id"], "538509");
+    assert!(!calls[1]
+        .template_context
+        .context
+        .contains_key("rawBodyBase64"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn configured_ingest_route_includes_trace_context_response_header() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let bridge_config = BridgeConfig {

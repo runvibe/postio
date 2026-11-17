@@ -18,6 +18,13 @@ Este arquivo acompanha as proximas tarefas praticas do Postio. Sempre revisar ju
 
 ## Ultima Atualizacao
 
+- 2026-11-17: `context.rawBodyBase64` nas rotas de ingestao (body cru em base64, calculado so
+  quando o sink referencia). Uso: webhook de status da QI Tech Risk Solutions, cuja assinatura
+  HMAC e verificada no risk-engine com a chave do tenant. Validacao local: `cargo test --lib` e
+  testes de ingestao da suite de integracao. Pendente: imagem nova e
+  `rawBodyBase64: "{{ context.rawBodyBase64 }}"` na rota `qitech-risk-solutions-webhook` do
+  k8s-sandbox e k8s-production.
+
 - Data: 2026-05-20.
 - Correcao publicada em producao: rotas dinamicas de ingestao e pipeline agora ficam cobertas pela camada HTTP OpenTelemetry.
 - Imagem mais recente publicada: `ghcr.io/runvibe/postio:c841ec4f548a5e016145af0f68e0686c3a8c789d`.

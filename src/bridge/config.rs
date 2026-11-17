@@ -58,7 +58,56 @@ pub enum SinkConfig {
     },
 }
 
+/// Chave de `context` com o body cru em base64. So e calculada quando o sink a usa.
+pub const RAW_BODY_BASE64_KEY: &str = "rawBodyBase64";
+
 impl SinkConfig {
+    /// `true` quando algum template do sink le `context.rawBodyBase64`.
+    pub fn references_raw_body(&self) -> bool {
+        let needle = format!("context.{RAW_BODY_BASE64_KEY}");
+        let in_str = |value: &Option<String>| value.as_deref().is_some_and(|v| v.contains(&needle));
+        let in_value =
+            |value: &Option<Value>| value.as_ref().is_some_and(|v| value_contains(v, &needle));
+        let in_map = |map: &Option<BTreeMap<String, Value>>| {
+            map.as_ref()
+                .is_some_and(|map| map.values().any(|v| value_contains(v, &needle)))
+        };
+        match self {
+            SinkConfig::Sns {
+                topic,
+                topic_arn,
+                subject,
+                message,
+                attributes,
+            } => {
+                in_str(topic)
+                    || in_str(topic_arn)
+                    || in_str(subject)
+                    || in_value(message)
+                    || in_map(attributes)
+            }
+            SinkConfig::Sqs {
+                queue,
+                queue_url,
+                message,
+                attributes,
+            } => in_str(queue) || in_str(queue_url) || in_value(message) || in_map(attributes),
+            SinkConfig::S3 {
+                bucket,
+                key,
+                content_type,
+                object,
+                metadata,
+            } => {
+                bucket.contains(&needle)
+                    || key.contains(&needle)
+                    || in_str(content_type)
+                    || in_value(object)
+                    || in_map(metadata)
+            }
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             SinkConfig::Sns { .. } => "sns",
@@ -112,6 +161,17 @@ fn validate_config(config: BridgeConfig) -> Result<BridgeConfig> {
         validate_pipeline_route_conflicts(&config.routes, pipeline)?;
     }
     Ok(config)
+}
+
+fn value_contains(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(value) => value.contains(needle),
+        Value::Array(values) => values.iter().any(|v| value_contains(v, needle)),
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, v)| key.contains(needle) || value_contains(v, needle)),
+        _ => false,
+    }
 }
 
 fn default_method() -> String {
@@ -759,5 +819,44 @@ pipeline:
         };
 
         assert_eq!(sink.type_name(), "s3");
+    }
+
+    #[test]
+    fn detects_raw_body_reference_only_when_used() {
+        let config: BridgeConfig = serde_yaml::from_str(
+            r#"
+routes:
+  - id: with-raw
+    path: /with
+    sink:
+      type: sns
+      topicArn: arn:aws:sns:us-east-1:1:t
+      message:
+        payload: "{{ body }}"
+        raw:
+          base64: "{{ context.rawBodyBase64 }}"
+  - id: in-attribute
+    path: /attr
+    sink:
+      type: sqs
+      queueUrl: https://sqs/q
+      attributes:
+        raw: "{{ context.rawBodyBase64 }}"
+  - id: without-raw
+    path: /without
+    sink:
+      type: sns
+      topicArn: arn:aws:sns:us-east-1:1:t
+      message:
+        payload: "{{ body }}"
+"#,
+        )
+        .expect("config parses");
+        let flags: Vec<bool> = config
+            .routes
+            .iter()
+            .map(|route| route.sink.references_raw_body())
+            .collect();
+        assert_eq!(flags, vec![true, true, false]);
     }
 }

@@ -912,6 +912,21 @@ Campos disponiveis em `context`:
 | `method` | Metodo HTTP recebido. Na v0 sera `POST`. |
 | `path` | Path real chamado pelo cliente. |
 | `routeId` | `id` da rota configurada. |
+| `rawBodyBase64` | Bytes exatos do body recebido, em base64. So existe quando algum template do sink referencia `context.rawBodyBase64`. |
+
+`context.rawBodyBase64` serve para quem consome a mensagem verificar assinatura de webhook
+(HMAC sobre o body cru): o `body` interpretado perde espacos e ordem de chaves, e qualquer
+diferenca de byte invalida a assinatura. O Postio nao verifica nada; so repassa os bytes.
+
+```yaml
+message:
+  payload: "{{ body }}"
+  rawBodyBase64: "{{ context.rawBodyBase64 }}"
+  headers:
+    signature: "{{ headers.signature }}"
+```
+
+Headers chegam em minusculas: use `{{ headers.signature }}`, nao `{{ headers.Signature }}`.
 
 Quando a string inteira e um template, o valor JSON original e preservado:
 
